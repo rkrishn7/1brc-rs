@@ -1,6 +1,7 @@
 use fxhash::FxHashMap;
 use memmap2::MmapOptions;
 use std::fs::File;
+use std::i32;
 use std::os::unix::fs::MetadataExt;
 
 #[derive(Clone, Copy)]
@@ -15,7 +16,7 @@ fn main() {
 
     let metadata = file.metadata().unwrap();
     let size = metadata.size();
-    let num_threads = 16;
+    let num_threads = 32;
     let step = size / num_threads;
 
     let mut results = Vec::new();
@@ -55,31 +56,32 @@ fn main() {
 
             let mut stats = Stats::new();
 
-            // let mut temp: [u8; 6] = [0; 6];
-
             for line in mmap.split(|c| *c == b'\n') {
                 let delim = line.iter().position(|c| *c == b';');
 
                 if let Some(delim) = delim {
                     let (city, reading) = unsafe { line.split_at_unchecked(delim) };
 
-                    // unsafe {
-                    //     memcpy(
-                    //         temp.as_ptr() as *mut c_void,
-                    //         reading[1..].as_ptr() as *const c_void,
-                    //         reading.len() - 1,
-                    //     );
-                    // }
-
-                    // temp[reading.len() - 1] = b'\0';
+                    // Each reading in `measurements.txt` is guaranteed to be less than
+                    // 100 and only have one number after its decimal point.
+                    let base = b'0' as i32;
+                    let reading = match &reading[1..] {
+                        [b'-', a, b'.', c] => -1 * (((*a as i32 % base) * 10) + (*c as i32 % base)),
+                        [b'-', a, b, b'.', c] => {
+                            -1 * (((*a as i32 % base) * 100)
+                                + ((*b as i32 % base) * 10)
+                                + (*c as i32 % base))
+                        }
+                        [a, b'.', c] => ((*a as i32 % base) * 10) + (*c as i32 % base),
+                        [a, b, b'.', c] => {
+                            ((*a as i32 % base) * 100)
+                                + ((*b as i32 % base) * 10)
+                                + (*c as i32 % base)
+                        }
+                        _ => panic!("unrecognized format for reading"),
+                    };
 
                     let city = unsafe { std::str::from_utf8_unchecked(city) };
-                    let reading = unsafe {
-                        // libc::atof(temp.as_ptr() as *const i8)
-                        std::str::from_utf8_unchecked(&reading[1..])
-                            .parse()
-                            .unwrap()
-                    };
 
                     stats.update(city, reading);
                 }
@@ -100,7 +102,7 @@ fn main() {
     stats.sort_unstable_by_key(|i| i.0);
 
     for (city, stats) in stats {
-        println!("{}: {}/{}/{}", city, stats.min, stats.avg, stats.max);
+        println!("{}: {}/{}/{}", city, stats.min(), stats.avg(), stats.max());
     }
 }
 
@@ -116,7 +118,7 @@ impl<'a> Stats<'a> {
         }
     }
 
-    pub fn update(&mut self, city: &'a str, reading: f64) {
+    pub fn update(&mut self, city: &'a str, reading: i32) {
         self.inner
             .entry(city)
             .and_modify(|s| s.push(reading))
@@ -143,37 +145,47 @@ impl<'a> Stats<'a> {
 
 #[derive(Debug)]
 struct StatsPer {
-    min: f64,
-    max: f64,
-    avg: f64,
-    seen: usize,
+    min: i32,
+    max: i32,
+    sum: i32,
+    count: usize,
 }
 
 impl StatsPer {
     pub fn new() -> Self {
         Self {
-            min: 0.0,
-            max: 0.0,
-            avg: 0.0,
-            seen: 0,
+            min: i32::MAX,
+            max: i32::MIN,
+            sum: 0,
+            count: 0,
         }
     }
 
-    pub fn push(&mut self, reading: f64) {
-        self.min = f64::min(self.min, reading);
-        self.max = f64::max(self.max, reading);
+    pub fn push(&mut self, reading: i32) {
+        self.min = std::cmp::min(self.min, reading);
+        self.max = std::cmp::max(self.max, reading);
 
-        self.seen += 1;
-
-        let seen = self.seen as f64;
-
-        self.avg = (self.avg * (seen - 1.0) + reading) / seen;
+        self.sum += reading;
+        self.count += 1;
     }
 
     pub fn merge(&mut self, other: StatsPer) {
-        self.min = f64::min(self.min, other.min);
-        self.max = f64::max(self.max, other.max);
+        self.min = std::cmp::min(self.min, other.min);
+        self.max = std::cmp::max(self.max, other.max);
 
-        self.avg = (self.avg + other.avg) / 2.0;
+        self.sum += other.sum;
+        self.count += other.count;
+    }
+
+    pub fn avg(&self) -> f32 {
+        (self.sum as f32 / self.count as f32) / 10.0
+    }
+
+    pub fn min(&self) -> f32 {
+        self.min as f32 / 10.0
+    }
+
+    pub fn max(&self) -> f32 {
+        self.max as f32 / 10.0
     }
 }
