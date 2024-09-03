@@ -1,3 +1,4 @@
 /target
 data/measurements.txt
 flamegraph.svg
+perf.data*
